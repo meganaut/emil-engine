@@ -1,113 +1,98 @@
-use std::time::{Duration, Instant};
+use glium::glutin::event::{Event, WindowEvent};
+use glium::glutin::event_loop::{ControlFlow, EventLoop};
+use glium::Surface;
 
-use glium::{
-    glutin::{
-        event::WindowEvent,
-        event_loop::{ControlFlow, EventLoopBuilder},
-        window::WindowBuilder,
-        ContextBuilder,
-    },
-    index::NoIndices,
-    Display, Surface, VertexBuffer,
-};
-use winit::event::{Event, StartCause};
-
-#[macro_use]
-extern crate glium;
-
-#[derive(Copy, Clone)]
-struct Vertex {
-    position: [f32; 2],
-}
-implement_vertex!(Vertex, position);
+const TITLE: &str = "Hello, imgui-rs!";
 
 fn main() {
-    // set up the application window
-    let event_loop = EventLoopBuilder::new().build();
-    let window_builder = WindowBuilder::new();
-    let context_builder = ContextBuilder::new();
-    let display = Display::new(window_builder, context_builder, &event_loop).unwrap();
+    // Common setup for creating a winit window and imgui context, not specifc
+    // to this renderer at all except that glutin is used to create the window
+    // since it will give us access to a GL context
+    let (event_loop, display) = create_window();
+    let (mut winit_platform, mut imgui_context) = imgui_init(&display);
 
-    let shape = vec![
-        Vertex {
-            position: [-0.5, -0.5],
-        },
-        Vertex {
-            position: [0.0, 0.5],
-        },
-        Vertex {
-            position: [0.5, -0.25],
-        },
-    ];
+    // Create renderer from this crate
+    let mut renderer = imgui_glium_renderer::Renderer::init(&mut imgui_context, &display)
+        .expect("Failed to initialize renderer");
 
-    let vertex_buffer = VertexBuffer::new(&display, &shape).unwrap();
+    // Timer for FPS calculation
+    let mut last_frame = std::time::Instant::now();
 
-    let indicies = NoIndices(glium::index::PrimitiveType::TrianglesList);
-
-    let vertex_shader_src = r#"
-    #version 140
-    
-    in vec2 position;
-
-    uniform float t;
-    
-    void main() {
-        vec2 pos = position;
-        pos.x += t;
-        gl_Position = vec4(pos, 0.0, 1.0);
-    }
-"#;
-
-    let fragment_shader_src = r#"
-    #version 140
-
-    out vec4 color;
-
-    void main() {
-        color = vec4(1.0, 0.0, 0.0, 1.0);
-    }
-"#;
-
-    let program =
-        glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src, None)
-            .unwrap();
-
-    let mut t: f32 = -0.5;
-    event_loop.run(move |ev, _, control_flow| {
-        match ev {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => {
-                    *control_flow = ControlFlow::Exit;
-                    return;
-                }
-                _ => return,
-            },
-            Event::NewEvents(cause) => match cause {
-                StartCause::ResumeTimeReached { .. } => (),
-                StartCause::Init => (),
-                _ => return,
-            },
-            _ => (),
-        };
-
-        let next_frame_time = Instant::now() + Duration::from_nanos(16_666_667);
-        *control_flow = ControlFlow::WaitUntil(next_frame_time);
-
-        t += 0.0002;
-        if t > 0.5 {
-            t = -0.5;
+    // Standard winit event loop
+    event_loop.run(move |event, _, control_flow| match event {
+        Event::NewEvents(_) => {
+            let now = std::time::Instant::now();
+            imgui_context.io_mut().update_delta_time(now - last_frame);
+            last_frame = now;
         }
-        let mut frame = display.draw();
-        frame.clear_color(0.0, 0.0, 1.0, 1.0);
-        frame
-            .draw(
-                &vertex_buffer,
-                &indicies,
-                &program,
-                &uniform! {t: t},
-                &Default::default(),
-            )
-            .unwrap();
-        frame.finish().unwrap();
+        Event::MainEventsCleared => {
+            let gl_window = display.gl_window();
+            winit_platform
+                .prepare_frame(imgui_context.io_mut(), gl_window.window())
+                .expect("Failed to prepare frame");
+            gl_window.window().request_redraw();
+        }
+        Event::RedrawRequested(_) => {
+            // Create frame for the all important `&imgui::Ui`
+            let ui = imgui_context.frame();
+
+            // Draw our example content
+            ui.show_demo_window(&mut true);
+
+            // Setup for drawing
+            let gl_window = display.gl_window();
+            let mut target = display.draw();
+
+            // Renderer doesn't automatically clear window
+            target.clear_color_srgb(0.0, 0.0, 1.0, 1.0);
+
+            // Perform rendering
+            winit_platform.prepare_render(ui, gl_window.window());
+            let draw_data = imgui_context.render();
+            renderer
+                .render(&mut target, draw_data)
+                .expect("Rendering failed");
+            target.finish().expect("Failed to swap buffers");
+        }
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => *control_flow = ControlFlow::Exit,
+        event => {
+            let gl_window = display.gl_window();
+            winit_platform.handle_event(imgui_context.io_mut(), gl_window.window(), &event);
+        }
     });
+}
+
+fn create_window() -> (EventLoop<()>, glium::Display) {
+    let event_loop = EventLoop::new();
+    let context = glium::glutin::ContextBuilder::new().with_vsync(true);
+    let builder = glium::glutin::window::WindowBuilder::new()
+        .with_title(TITLE.to_owned())
+        .with_inner_size(glium::glutin::dpi::LogicalSize::new(1024f64, 768f64));
+    let display =
+        glium::Display::new(builder, context, &event_loop).expect("Failed to initialize display");
+
+    (event_loop, display)
+}
+
+fn imgui_init(display: &glium::Display) -> (imgui_winit_support::WinitPlatform, imgui::Context) {
+    let mut imgui_context = imgui::Context::create();
+    imgui_context.set_ini_filename(None);
+
+    let mut winit_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
+
+    let gl_window = display.gl_window();
+    let window = gl_window.window();
+
+    let dpi_mode = imgui_winit_support::HiDpiMode::Default;
+
+    winit_platform.attach_window(imgui_context.io_mut(), window, dpi_mode);
+
+    imgui_context
+        .fonts()
+        .add_font(&[imgui::FontSource::DefaultFontData { config: None }]);
+
+    (winit_platform, imgui_context)
 }

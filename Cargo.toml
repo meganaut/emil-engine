@@ -8,3 +8,6 @@ edition = "2021"
 [dependencies]
 glium = "0.32"
 winit = "*"
+imgui= "*"
+imgui-glium-renderer = "*"
+imgui-winit-support = "*"
